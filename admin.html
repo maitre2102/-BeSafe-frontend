@@ -44,6 +44,12 @@
   </header>
   <div id="map"></div>
   <div class="wrap">
+    <div class="section-title">Incidents et trajets (alertes, sirène)</div>
+    <table>
+      <thead><tr><th>Type</th><th>Utilisateur</th><th>Déclenché</th><th>Clôturé</th><th>Points</th><th></th></tr></thead>
+      <tbody id="incidentRows"></tbody>
+    </table>
+
     <div class="section-title">Tous les profils enregistrés</div>
     <table>
       <thead><tr><th></th><th>Nom</th><th>Téléphone</th><th>Contacts de confiance</th><th>Vu pour la dernière fois</th></tr></thead>
@@ -70,7 +76,9 @@
         document.getElementById('app').style.display = 'block';
         initMap();
         refresh();
+        refreshIncidents();
         setInterval(refresh, 15000);
+        setInterval(refreshIncidents, 15000);
       } else {
         document.getElementById('gateError').style.display = 'block';
       }
@@ -88,6 +96,7 @@
     map = L.map('map').setView([50.8503, 4.3517], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
     layer = L.layerGroup().addTo(map);
+    trailLayer = L.layerGroup().addTo(map);
   }
 
   function timeAgo(ts){
@@ -98,7 +107,47 @@
     return Math.floor(diff/86400) + ' j';
   }
 
-  function refresh(){
+  function fetchIncidents(key, cb){
+    fetch(backendUrl() + '/api/incidents?key=' + encodeURIComponent(key))
+      .then(function(r){ if (!r.ok) throw new Error('unauthorized'); return r.json(); })
+      .then(function(data){ cb(true, data); })
+      .catch(function(){ cb(false); });
+  }
+
+  var trailLayer;
+  var INCIDENT_LABELS = { alerte_urgence: '🚨 Alerte', alerte_discrete: '🤝 Discrète', sirene: '🔊 Sirène' };
+
+  function showTrail(incident){
+    trailLayer.clearLayers();
+    if (!incident.positions.length) return;
+    var latlngs = incident.positions.map(function(p){ return [p.latitude, p.longitude]; });
+    L.polyline(latlngs, { color: '#ec407a', weight: 4 }).addTo(trailLayer);
+    L.circleMarker(latlngs[0], { radius: 6, color: '#1a9f6a', fillOpacity: 1 }).bindPopup('Départ').addTo(trailLayer);
+    L.circleMarker(latlngs[latlngs.length - 1], { radius: 6, color: '#e5484d', fillOpacity: 1 }).bindPopup('Dernier point').addTo(trailLayer);
+    map.fitBounds(latlngs, { padding: [30, 30] });
+  }
+
+  function refreshIncidents(){
+    var key = localStorage.getItem(KEY_STORAGE);
+    fetchIncidents(key, function(ok, data){
+      if (!ok) return;
+      var rows = document.getElementById('incidentRows');
+      rows.innerHTML = '';
+      (data.incidents || []).forEach(function(inc){
+        var tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.innerHTML =
+          '<td>' + (INCIDENT_LABELS[inc.type] || inc.type) + '</td>' +
+          '<td>' + (inc.user_name || '—') + '</td>' +
+          '<td>' + new Date(inc.started_at).toLocaleString('fr-BE') + '</td>' +
+          '<td>' + (inc.ended_at ? new Date(inc.ended_at).toLocaleString('fr-BE') : '<span style="color:var(--pink);">en cours</span>') + '</td>' +
+          '<td>' + inc.positions.length + '</td>' +
+          '<td><button class="btn" style="padding:6px 10px; font-size:12px;">Voir le trajet</button></td>';
+        tr.querySelector('button').addEventListener('click', function(){ showTrail(inc); });
+        rows.appendChild(tr);
+      });
+    });
+  }
     var key = localStorage.getItem(KEY_STORAGE);
     fetchDevices(key, function(ok, data){
       if (!ok) return;
@@ -138,7 +187,9 @@
         document.getElementById('app').style.display = 'block';
         initMap();
         refresh();
+        refreshIncidents();
         setInterval(refresh, 15000);
+        setInterval(refreshIncidents, 15000);
       }
     });
   }
