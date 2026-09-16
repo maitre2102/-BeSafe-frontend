@@ -236,8 +236,23 @@
       </div>
       <p style="font-size:12px; color:var(--gray); margin:-8px 0 20px;">Laisse vide pour utiliser le backend par défaut de l'app.</p>
     </div>
+    <h3>Aide</h3>
+    <button class="btn btn-outline" id="openAssistant" style="width:100%; margin-bottom:20px;">💬 Discuter avec l'assistant</button>
     <h3>Données</h3>
     <button class="btn btn-danger" id="resetData">Réinitialiser mes données</button>
+  </div>
+
+  <!-- Assistant IA -->
+  <div class="sheet" id="sheetAssistant" style="padding:0;">
+    <div style="display:flex; align-items:center; gap:10px; padding:20px 20px 12px;">
+      <span class="back" data-close style="cursor:pointer; font-size:20px;">←</span>
+      <span style="font-size:16px; font-weight:500;">Assistant BeSafe</span>
+    </div>
+    <div id="chatMessages" style="flex:1; overflow-y:auto; padding:0 20px; display:flex; flex-direction:column; gap:10px;"></div>
+    <div style="display:flex; gap:8px; padding:14px 20px 20px; border-top:1px solid var(--border);">
+      <input id="chatInput" type="text" placeholder="Pose ta question…" style="flex:1; padding:10px; border:1px solid var(--border); border-radius:20px; font-size:14px;">
+      <button id="chatSend" class="btn btn-primary" style="border-radius:20px; padding:10px 18px;">Envoyer</button>
+    </div>
   </div>
 
   <!-- A propos -->
@@ -659,6 +674,7 @@
           '<a class="call" href="tel:' + selectedContact.phone + '">Appeler</a>' +
         '</div></div>';
       sendBtn.style.display = 'none';
+      startIncident('alerte_discrete', 15 * 60 * 1000);
 
       // Tentative d'automatisation en arrière-plan, silencieuse : si un jour Twilio est prêt,
       // ça part aussi tout seul, sans rien changer à l'affichage ni bloquer le lien manuel ci-dessus.
@@ -725,6 +741,49 @@
     }
     window._showToast = showToast;
 
+    // ---------- Trajet lié à un incident (alerte, alerte discrète, sirène) ----------
+    // On ne trace jamais les déplacements ordinaires : uniquement pendant un incident actif,
+    // du déclenchement jusqu'à la confirmation "je suis en sécurité".
+    var activeIncidents = {}; // type -> { id, interval }
+
+    function startIncident(type, autoCloseMs){
+      fetch(getBackendUrl() + '/api/incidents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: type,
+          deviceId: deviceId,
+          userName: profile.name,
+          latitude: currentLatLng ? currentLatLng[0] : null,
+          longitude: currentLatLng ? currentLatLng[1] : null
+        })
+      }).then(function(r){ return r.json(); }).then(function(data){
+        if (!data.incidentId) return;
+        var interval = setInterval(function(){
+          if (!currentLatLng) return;
+          fetch(getBackendUrl() + '/api/incidents/' + data.incidentId + '/position', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ latitude: currentLatLng[0], longitude: currentLatLng[1] })
+          }).catch(function(){});
+        }, 15000);
+        activeIncidents[type] = { id: data.incidentId, interval: interval };
+        if (autoCloseMs) setTimeout(function(){ closeIncident(type); }, autoCloseMs);
+      }).catch(function(){});
+    }
+
+    function closeIncident(type){
+      var inc = activeIncidents[type];
+      if (!inc) return;
+      clearInterval(inc.interval);
+      fetch(getBackendUrl() + '/api/incidents/' + inc.id + '/close', { method: 'POST' }).catch(function(){});
+      delete activeIncidents[type];
+    }
+
+    function closeAllIncidents(){
+      Object.keys(activeIncidents).forEach(closeIncident);
+    }
+
     // Siren
     var sirenBtn = document.getElementById('sirenBtn');
     var sirenLabel = document.getElementById('sirenLabel');
@@ -734,6 +793,7 @@
       sirenBtn.classList.toggle('active', sirenOn);
       sirenLabel.style.display = sirenOn ? 'block' : 'none';
       if (sirenOn) {
+        startIncident('sirene');
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         oscillator = audioCtx.createOscillator();
         var gain = audioCtx.createGain();
@@ -752,6 +812,7 @@
           vibrateInterval = setInterval(function(){ navigator.vibrate([300,100,300]); }, 800);
         }
       } else {
+        closeIncident('sirene');
         if (oscillator) { clearInterval(oscillator._sweep); oscillator.stop(); oscillator.disconnect(); oscillator = null; }
         if (audioCtx) { audioCtx.close(); audioCtx = null; }
         if (vibrateInterval) { clearInterval(vibrateInterval); vibrateInterval = null; }
@@ -773,6 +834,7 @@
       var list = document.getElementById('contactsList');
       list.innerHTML = '<p style="font-size:13px;">Envoi de l\'alerte en cours…</p>';
       alertPanel.classList.add('show');
+      startIncident('alerte_urgence');
 
       fetch(getBackendUrl() + '/api/alerts', {
         method: 'POST',
@@ -831,6 +893,7 @@
       confirmModal.classList.remove('show');
       alertPanel.classList.remove('show');
       window._stopSiren();
+      closeAllIncidents();
       profile.lastSafeAt = new Date().toISOString();
       saveProfile(profile);
       var toast = document.getElementById('toast');
@@ -898,6 +961,64 @@
       if (isDevDevice) profile.backendUrl = document.getElementById('inBackendUrl').value.trim();
       saveProfile(profile);
       registerDevice();
+    });
+
+    // ---------- Assistant IA (aide à l'utilisation) ----------
+    var chatHistory = [];
+    var chatMessages = document.getElementById('chatMessages');
+
+    function renderChatBubble(role, text){
+      var bubble = document.createElement('div');
+      var isUser = role === 'user';
+      bubble.style.cssText = 'max-width:80%; padding:10px 14px; border-radius:14px; font-size:13px; line-height:1.4; align-self:' +
+        (isUser ? 'flex-end' : 'flex-start') + '; background:' + (isUser ? 'var(--blue)' : 'var(--bg)') +
+        '; color:' + (isUser ? '#fff' : 'var(--dark)') + '; border:' + (isUser ? 'none' : '1px solid var(--border)') + ';';
+      bubble.textContent = text;
+      chatMessages.appendChild(bubble);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    document.getElementById('openAssistant').addEventListener('click', function(){
+      if (!chatHistory.length) {
+        renderChatBubble('assistant', 'Salut ! Je suis l\'assistant BeSafe. Pose-moi une question sur l\'utilisation de l\'app (boutons, contacts, signalement…).');
+      }
+      document.getElementById('sheetAssistant').classList.add('show');
+    });
+
+    function sendChatMessage(){
+      var input = document.getElementById('chatInput');
+      var text = input.value.trim();
+      if (!text) return;
+      renderChatBubble('user', text);
+      chatHistory.push({ role: 'user', content: text });
+      input.value = '';
+
+      var typing = document.createElement('div');
+      typing.id = 'chatTyping';
+      typing.style.cssText = 'align-self:flex-start; font-size:12px; color:var(--gray);';
+      typing.textContent = 'L\'assistant écrit…';
+      chatMessages.appendChild(typing);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+
+      fetch(getBackendUrl() + '/api/support-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: chatHistory })
+      }).then(function(r){ return r.json(); }).then(function(data){
+        var t = document.getElementById('chatTyping');
+        if (t) t.remove();
+        var reply = data.reply || 'Assistant indisponible pour le moment.';
+        renderChatBubble('assistant', reply);
+        chatHistory.push({ role: 'assistant', content: reply });
+      }).catch(function(){
+        var t = document.getElementById('chatTyping');
+        if (t) t.remove();
+        renderChatBubble('assistant', 'Impossible de joindre l\'assistant pour le moment. Réessaie un peu plus tard.');
+      });
+    }
+    document.getElementById('chatSend').addEventListener('click', sendChatMessage);
+    document.getElementById('chatInput').addEventListener('keydown', function(e){
+      if (e.key === 'Enter') sendChatMessage();
     });
   }
 })();
