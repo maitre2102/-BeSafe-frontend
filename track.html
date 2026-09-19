@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BeSafe — Suivi en direct</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --pink: #ec407a; --green: #1a9f6a; --red: #e5484d; --gray: #6b7280; --border: #e5e5e5; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { background: #fff; border-bottom: 1px solid var(--border); padding: 14px 18px; }
+  header h1 { font-size: 15px; margin: 0 0 2px; }
+  header p { font-size: 12px; color: var(--gray); margin: 0; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-top: 6px; }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status.live .dot { background: var(--green); animation: pulse 1.2s infinite; }
+  .status.ended .dot { background: var(--gray); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  #map { height: calc(100vh - 78px); width: 100%; }
+  #msg { max-width: 320px; margin: 60px auto; text-align: center; padding: 20px; color: var(--gray); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="title">Suivi en direct</h1>
+  <p id="subtitle">Chargement…</p>
+  <div class="status" id="statusBadge" style="display:none;"><span class="dot"></span><span id="statusText"></span></div>
+</header>
+
+<div id="map" style="display:none;"></div>
+<div id="msg" style="display:none;"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+  var DEFAULT_BACKEND_URL = 'https://besafe-backend-99a4.onrender.com';
+  var params = new URLSearchParams(window.location.search);
+  var incidentId = params.get('id');
+
+  var TYPE_LABELS = {
+    alerte_urgence: 'a déclenché une alerte d\'urgence',
+    alerte_discrete: 'traverse un moment inconfortable',
+    sirene: 'a activé sa sirène de sécurité'
+  };
+
+  function showMessage(text){
+    document.getElementById('map').style.display = 'none';
+    var msg = document.getElementById('msg');
+    msg.style.display = 'block';
+    msg.textContent = text;
+  }
+
+  if (!incidentId) {
+    showMessage('Lien de suivi invalide.');
+  } else {
+    var map, marker, trail, hasCentered = false;
+
+    function initMap(){
+      map = L.map('map').setView([50.8503, 4.3517], 14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+      trail = L.layerGroup().addTo(map);
+      var icon = L.divIcon({
+        className: '',
+        html: '<div style="width:18px;height:18px;border-radius:50%;background:#ec407a;border:3px solid #fff;box-shadow:0 0 0 5px rgba(236,64,122,0.3);"></div>',
+        iconSize: [24,24], iconAnchor: [12,12]
+      });
+      marker = L.marker([50.8503, 4.3517], { icon: icon }).addTo(map);
+      document.getElementById('map').style.display = 'block';
+    }
+
+    function render(data){
+      var name = data.userName || 'Cette personne';
+      document.getElementById('title').textContent = name;
+      document.getElementById('subtitle').textContent = name + ' ' + (TYPE_LABELS[data.type] || 'a partagé sa position');
+
+      var badge = document.getElementById('statusBadge');
+      var statusText = document.getElementById('statusText');
+      badge.style.display = 'inline-flex';
+      if (data.endedAt) {
+        badge.className = 'status ended';
+        statusText.textContent = 'Terminé — ' + name + ' a confirmé être en sécurité';
+      } else {
+        badge.className = 'status live';
+        statusText.textContent = 'En direct';
+      }
+
+      if (!data.positions.length) return;
+      if (!map) initMap();
+
+      var latlngs = data.positions.map(function(p){ return [p.latitude, p.longitude]; });
+      trail.clearLayers();
+      if (latlngs.length > 1) {
+        L.polyline(latlngs, { color: '#ec407a', weight: 4, opacity: 0.7 }).addTo(trail);
+      }
+      var last = latlngs[latlngs.length - 1];
+      marker.setLatLng(last);
+      if (!hasCentered) { map.setView(last, 16); hasCentered = true; }
+    }
+
+    function poll(){
+      fetch(DEFAULT_BACKEND_URL + '/api/incidents/' + encodeURIComponent(incidentId) + '/track')
+        .then(function(r){
+          if (!r.ok) throw new Error('not found');
+          return r.json();
+        })
+        .then(function(data){
+          render(data);
+          if (!data.endedAt) setTimeout(poll, 8000);
+        })
+        .catch(function(){
+          showMessage('Ce lien de suivi n\'est plus valide, ou la position n\'est pas encore disponible. Réessaie dans quelques instants.');
+          setTimeout(poll, 8000);
+        });
+    }
+
+    poll();
+  }
+</script>
+</body>
+</html>
